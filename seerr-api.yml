@@ -6625,6 +6625,75 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MediaRequest'
+  /request/batch:
+    post:
+      summary: Request selected collection movies before starting searches
+      description: |
+        Creates movie requests using the normal permissions, quotas, blocklist and approval rules.
+        Approved movies are added before a combined search is sent to each Radarr server.
+        A partial result does not roll back successful requests. Check each result before retrying.
+      tags:
+        - request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requests]
+              properties:
+                requests:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    allOf:
+                      - $ref: '#/paths/~1request/post/requestBody/content/application~1json/schema'
+                      - type: object
+                        properties:
+                          mediaType:
+                            type: string
+                            enum: [movie]
+                          mediaId:
+                            type: integer
+                            minimum: 1
+      responses:
+        '201':
+          description: All requests saved and any searches accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, searchErrors]
+                properties:
+                  searchErrors:
+                    type: array
+                    items:
+                      type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [mediaId, status]
+                      properties:
+                        mediaId:
+                          type: integer
+                        status:
+                          type: integer
+                        message:
+                          type: string
+                        request:
+                          $ref: '#/components/schemas/MediaRequest'
+        '207':
+          description: Some requests failed or a search could not be started; successful requests were saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/paths/~1request~1batch/post/responses/201/content/application~1json/schema'
+        '400':
+          description: Invalid batch
+        '401':
+          description: Authentication required
   /request/count:
     get:
       summary: Gets request counts

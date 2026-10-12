@@ -209,10 +209,14 @@ class SonarrAPI extends ServarrBase<{
 
   public async addSeries(options: AddSeriesOptions): Promise<SonarrSeries> {
     try {
+      const allowPacks = await this.allowsPacks(options.profileId, 'tv');
       const series = await this.getSeriesByTvdbId(options.tvdbid);
 
       // If the series already exists, we will simply just update it
       if (series.id) {
+        if (allowPacks) {
+          series.qualityProfileId = options.profileId;
+        }
         series.monitored = options.monitored ?? series.monitored;
         series.tags = options.tags
           ? Array.from(new Set([...series.tags, ...options.tags]))
@@ -256,6 +260,7 @@ class SonarrAPI extends ServarrBase<{
               await this.monitorEpisodes(episodeIdsToMonitor);
             }
           } catch (e) {
+            if (allowPacks) throw e;
             logger.warn('Failed to re-monitor episodes', {
               label: 'Sonarr',
               errorMessage: e.message,
@@ -299,7 +304,7 @@ class SonarrAPI extends ServarrBase<{
           rootFolderPath: options.rootFolderPath,
           seriesType: options.seriesType,
           addOptions: {
-            ignoreEpisodesWithFiles: true,
+            ignoreEpisodesWithFiles: !allowPacks,
             searchForMissingEpisodes: options.searchNow,
           },
         } as Partial<SonarrSeries>

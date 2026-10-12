@@ -3,7 +3,7 @@ import SonarrAPI from '@server/api/servarr/sonarr';
 import { MediaType } from '@server/constants/media';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
-import { uniqWith } from 'lodash';
+import { uniqBy, uniqWith } from 'lodash';
 
 interface EpisodeNumberResult {
   seasonNumber: number;
@@ -59,9 +59,11 @@ class DownloadTracker {
     this.sonarrServers = {};
   }
 
-  public updateDownloads() {
-    this.updateRadarrDownloads();
-    this.updateSonarrDownloads();
+  public async updateDownloads() {
+    await Promise.all([
+      this.updateRadarrDownloads(),
+      this.updateSonarrDownloads(),
+    ]);
   }
 
   private async updateRadarrDownloads() {
@@ -77,7 +79,7 @@ class DownloadTracker {
     });
 
     // Load downloads from Radarr servers
-    Promise.all(
+    await Promise.all(
       filteredServers.map(async (server) => {
         if (server.syncEnabled) {
           const radarr = new RadarrAPI({
@@ -89,17 +91,26 @@ class DownloadTracker {
             await radarr.refreshMonitoredDownloads();
             const queueItems = await radarr.getQueue();
 
-            this.radarrServers[server.id] = queueItems.map((item) => ({
-              externalId: item.movieId,
-              estimatedCompletionTime: new Date(item.estimatedCompletionTime),
-              mediaType: MediaType.MOVIE,
-              size: item.size,
-              sizeLeft: item.sizeleft,
-              status: item.status,
-              timeLeft: item.timeleft,
-              title: item.title,
-              downloadId: item.downloadId,
-            }));
+            this.radarrServers[server.id] = uniqBy(
+              queueItems.flatMap((item) =>
+                [...new Set([item.movieId, ...(item.moviePackMovieIds ?? [])])]
+                  .filter((id) => Number.isSafeInteger(id) && id > 0)
+                  .map((externalId) => ({
+                    externalId,
+                    estimatedCompletionTime: new Date(
+                      item.estimatedCompletionTime
+                    ),
+                    mediaType: MediaType.MOVIE,
+                    size: item.size,
+                    sizeLeft: item.sizeleft,
+                    status: item.status,
+                    timeLeft: item.timeleft,
+                    title: item.title,
+                    downloadId: item.downloadId,
+                  }))
+              ),
+              (item) => `${item.externalId}:${item.downloadId}`
+            );
 
             if (queueItems.length > 0) {
               logger.debug(
@@ -155,7 +166,7 @@ class DownloadTracker {
     });
 
     // Load downloads from Sonarr servers
-    Promise.all(
+    await Promise.all(
       filteredServers.map(async (server) => {
         if (server.syncEnabled) {
           const sonarr = new SonarrAPI({

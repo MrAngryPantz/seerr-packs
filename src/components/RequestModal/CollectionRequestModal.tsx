@@ -11,6 +11,7 @@ import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
 import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
+import type { BatchRequestResponse } from '@server/interfaces/api/requestInterfaces';
 import type { QuotaResponse } from '@server/interfaces/api/userInterfaces';
 import { Permission } from '@server/lib/permissions';
 import type { Collection } from '@server/models/Collection';
@@ -25,6 +26,10 @@ const messages = defineMessages('components.RequestModal', {
   requestcollectiontitle: 'Request Collection',
   requestcollection4ktitle: 'Request Collection in 4K',
   requesterror: 'Something went wrong while submitting the request.',
+  partialrequest:
+    'Some movies could not be requested. Successful requests have been saved. Review the messages below before retrying.',
+  packhelp:
+    'Selected movies are added before searching. Movie packs can be used when the Radarr quality profile allows them. Each movie keeps its own approval and availability status.',
   selectmovies: 'Select Movie(s)',
   requestmovies: 'Request {count} {count, plural, one {Movie} other {Movies}}',
   requestmovies4k:
@@ -47,6 +52,7 @@ const CollectionRequestModal = ({
   is4k = false,
 }: RequestModalProps) => {
   const [isUpdating, setIsUpdating] = useState(false);
+  const [requestErrors, setRequestErrors] = useState<string[]>([]);
   const [requestOverrides, setRequestOverrides] =
     useState<RequestOverrides | null>(null);
   const [selectedParts, setSelectedParts] = useState<number[]>([]);
@@ -84,7 +90,7 @@ const CollectionRequestModal = ({
                 request.status !== MediaRequestStatus.DECLINED &&
                 request.status !== MediaRequestStatus.COMPLETED
             )
-            .map((part) => part.id),
+            .map(() => part.id),
         ];
       },
       [] as number[]
@@ -185,6 +191,7 @@ const CollectionRequestModal = ({
 
   const sendRequest = useCallback(async () => {
     setIsUpdating(true);
+    setRequestErrors([]);
 
     try {
       let overrideParams = {};
@@ -198,18 +205,44 @@ const CollectionRequestModal = ({
         };
       }
 
-      await Promise.all(
-        (
-          data?.parts.filter((part) => selectedParts.includes(part.id)) ?? []
-        ).map(async (part) => {
-          await axios.post<MediaRequest>('/api/v1/request', {
+      const { data: batch } = await axios.post<BatchRequestResponse>(
+        '/api/v1/request/batch',
+        {
+          requests: (
+            data?.parts.filter((part) => selectedParts.includes(part.id)) ?? []
+          ).map((part) => ({
             mediaId: part.id,
             mediaType: 'movie',
             is4k,
             ...overrideParams,
-          });
-        })
+          })),
+        }
       );
+      mutate(`/api/v1/collection/${tmdbId}`);
+      mutate('/api/v1/request/count');
+      const errors = [
+        ...batch.results
+          .filter((result) => result.status !== 201)
+          .map(
+            (result) =>
+              `${data?.parts.find((part) => part.id === result.mediaId)?.title ?? result.mediaId}: ${result.message}`
+          ),
+        ...batch.searchErrors,
+      ];
+      setRequestErrors(errors);
+      if (errors.length) {
+        setSelectedParts((parts) =>
+          parts.filter(
+            (id) =>
+              !batch.results.some(
+                (result) =>
+                  result.mediaId === id &&
+                  (result.request || result.status === 409)
+              )
+          )
+        );
+        return;
+      }
 
       if (onComplete) {
         onComplete(
@@ -239,6 +272,7 @@ const CollectionRequestModal = ({
     }
   }, [
     requestOverrides,
+    tmdbId,
     data?.parts,
     data?.name,
     onComplete,
@@ -290,6 +324,19 @@ const CollectionRequestModal = ({
       okButtonType={'primary'}
       backdrop={`https://image.tmdb.org/t/p/w1920_and_h800_multi_faces/${data?.backdropPath}`}
     >
+      <Alert type="info">{intl.formatMessage(messages.packhelp)}</Alert>
+      {requestErrors.length > 0 && (
+        <Alert
+          type="warning"
+          title={intl.formatMessage(messages.partialrequest)}
+        >
+          <ul>
+            {requestErrors.map((error, index) => (
+              <li key={index}>{error}</li>
+            ))}
+          </ul>
+        </Alert>
+      )}
       {hasAutoApprove && !quota?.movie.restricted && (
         <div className="mt-6">
           <Alert

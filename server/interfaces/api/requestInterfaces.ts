@@ -28,3 +28,15 @@ export type MediaRequestBody = {
   tags?: number[];
   ignoreQuota?: boolean;
 };
+
+export interface BatchRequestResult {
+  mediaId: number;
+  status: number;
+  request?: MediaRequest;
+  message?: string;
+}
+
+export interface BatchRequestResponse {
+  results: BatchRequestResult[];
+  searchErrors: string[];
+}

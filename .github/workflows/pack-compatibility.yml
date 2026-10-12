@@ -1,0 +1,52 @@
+name: Pack request compatibility
+
+on:
+  push:
+    branches: [pack-requests]
+  pull_request:
+    branches: [pack-requests]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pack-requests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CI: true
+      CYPRESS_INSTALL_BINARY: 0
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check types
+        run: pnpm typecheck
+      - name: Test requests, approvals, quotas, queues and scanners
+        run: pnpm test
+      - name: Build production application
+        run: pnpm build
+      - name: Exercise production application
+        run: node scripts/test-startup.mjs
+      - name: Save test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ runner.os }}
+          path: report.xml
+          retention-days: 14

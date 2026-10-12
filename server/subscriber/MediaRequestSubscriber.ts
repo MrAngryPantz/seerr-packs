@@ -18,6 +18,7 @@ import { MediaRequest } from '@server/entity/MediaRequest';
 import Season from '@server/entity/Season';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import notificationManager, { Notification } from '@server/lib/notifications';
+import { getRequestBatch } from '@server/lib/requestBatch';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { withNestedTransaction } from '@server/utils/nestedTransaction';
@@ -189,6 +190,15 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
       entity.status === MediaRequestStatus.APPROVED &&
       entity.type === MediaType.MOVIE
     ) {
+      const batch = getRequestBatch();
+      if (
+        batch?.defer(entity.id, () =>
+          this.sendToRadarr(entity, getRepository(Media).manager)
+        )
+      ) {
+        return;
+      }
+
       try {
         const mediaRepository = manager.getRepository(Media);
         const settings = getSettings();
@@ -374,11 +384,11 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           year: Number(movie.release_date.slice(0, 4)),
           monitored: true,
           tags,
-          searchNow: !radarrSettings.preventSearch,
+          searchNow: !radarrSettings.preventSearch && !batch,
         };
 
         // Run entity asynchronously so we don't wait for it on the UI side
-        radarr
+        const delivery = radarr
           .addMovie(radarrMovieOptions)
           .then(async (radarrMovie) => {
             // Needs its own repository as this runs detached from the request transaction
@@ -400,8 +410,24 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
             media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
               radarrSettings?.id;
             await mediaRepository.save(media);
+
+            if (
+              batch &&
+              radarrSettings &&
+              !radarrSettings.preventSearch &&
+              !radarrMovie.hasFile
+            ) {
+              batch.search(
+                RadarrAPI.buildUrl(radarrSettings, '/api/v3'),
+                radarrMovie.id,
+                (ids) => radarr.searchMovies(ids)
+              );
+            }
           })
           .catch(async () => {
+            if (batch && radarrSettings) {
+              batch.fail(RadarrAPI.buildUrl(radarrSettings, '/api/v3'));
+            }
             try {
               const requestRepository = getRepository(MediaRequest);
 
@@ -444,12 +470,14 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
                 : media.externalServiceId,
             });
           });
+        batch?.track(delivery);
         logger.info('Sent request to Radarr', {
           label: 'Media Request',
           requestId: entity.id,
           mediaId: entity.media.id,
         });
       } catch (e) {
+        batch?.abort();
         const requestRepository = manager.getRepository(MediaRequest);
         const mediaRepository = manager.getRepository(Media);
         const media = await mediaRepository.findOne({

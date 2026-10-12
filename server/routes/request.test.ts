@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { TestContext } from 'node:test';
 import { before, beforeEach, describe, it, mock } from 'node:test';
 
 import TheMovieDb from '@server/api/themoviedb';
@@ -72,6 +75,8 @@ Object.defineProperty(TheMovieDb.prototype, 'getTvShow', {
 function fakeTmdbMovie(tmdbId: number): TmdbMovieDetails {
   return {
     id: tmdbId,
+    title: `Example ${tmdbId}`,
+    release_date: '2020-01-01',
     genres: [],
     original_language: 'en',
     keywords: { keywords: [] },
@@ -1626,5 +1631,227 @@ describe('DELETE /request/:requestId, orphaned season status reset', () => {
     const updated = await mediaRepo.findOneOrFail({ where: { id: media.id } });
     assert.strictEqual(updated.seasons[0].status, MediaStatus.UNKNOWN);
     assert.strictEqual(updated.seasons[0].status4k, MediaStatus.PROCESSING);
+  });
+});
+
+describe('POST /request/batch', () => {
+  async function radarrServer(
+    t: TestContext,
+    options: {
+      failMovie?: number;
+      failSearch?: boolean;
+      preventSearch?: boolean;
+    } = {}
+  ) {
+    const events: { type: string; body: Record<string, unknown> }[] = [];
+    const server = createServer(async (req, res) => {
+      let text = '';
+      for await (const chunk of req) text += chunk;
+      const body = text ? JSON.parse(text) : {};
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      res.setHeader('Content-Type', 'application/json');
+      if (url.pathname.toLowerCase().endsWith('/qualityprofile')) {
+        res.end(
+          JSON.stringify([
+            {
+              id: 1,
+              name: 'Packs',
+              allowMoviePacks: true,
+              upgradeAllowed: false,
+            },
+          ])
+        );
+      } else if (url.pathname.endsWith('/movie/lookup')) {
+        const tmdbId = Number(url.searchParams.get('term')?.split(':')[1]);
+        res.end(
+          JSON.stringify([
+            { tmdbId, title: `Example ${tmdbId}`, tags: [], hasFile: false },
+          ])
+        );
+      } else if (url.pathname.endsWith('/movie')) {
+        events.push({ type: 'add', body });
+        if (body.tmdbId === options.failMovie) {
+          res.statusCode = 503;
+          res.end('{}');
+        } else {
+          res.end(
+            JSON.stringify({
+              ...body,
+              id: body.tmdbId,
+              titleSlug: String(body.tmdbId),
+              hasFile: false,
+            })
+          );
+        }
+      } else if (url.pathname.endsWith('/command')) {
+        events.push({ type: 'search', body });
+        res.statusCode = options.failSearch ? 503 : 201;
+        res.end('{}');
+      } else {
+        res.statusCode = 404;
+        res.end('{}');
+      }
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve)
+    );
+    t.after(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+          server.closeAllConnections();
+        })
+    );
+    configureRadarr([
+      {
+        hostname: '127.0.0.1',
+        port: (server.address() as AddressInfo).port,
+        preventSearch: options.preventSearch ?? false,
+      },
+    ]);
+    getSettings().sonarr = [];
+    return events;
+  }
+
+  const movies = (...ids: number[]) => ({
+    requests: ids.map((mediaId) => ({ mediaId, mediaType: 'movie' })),
+  });
+
+  it('adds all approved movies before one search and keeps separate request records', async (t) => {
+    const events = await radarrServer(t);
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await admin
+      .post('/request/batch')
+      .send(movies(98001, 98002, 98003));
+    assert.equal(res.status, 201);
+    assert.deepEqual(res.body.searchErrors, []);
+    assert.equal(
+      new Set(
+        res.body.results.map((r: { request: MediaRequest }) => r.request.id)
+      ).size,
+      3
+    );
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['add', 'add', 'add', 'search']
+    );
+    for (const e of events.filter((e) => e.type === 'add')) {
+      assert.deepEqual(e.body.addOptions, { searchForMovie: false });
+    }
+    assert.deepEqual(events[3].body, {
+      name: 'MoviesSearch',
+      movieIds: [98001, 98002, 98003],
+    });
+    const media = await getRepository(Media).findOneByOrFail({ tmdbId: 98003 });
+    assert.equal(media.externalServiceId, 98003);
+    assert.notEqual(media.status, MediaStatus.AVAILABLE);
+  });
+
+  it('keeps pending requests out of Radarr and charges the normal quota for each movie', async (t) => {
+    const events = await radarrServer(t);
+    const user = await seedUser('demo@seerr.dev', { movieQuotaLimit: 1 });
+    await getRepository(User).update(user.id, { permissions: Permission.REQUEST_MOVIE });
+    const demo = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await demo.post('/request/batch').send(movies(98101, 98102));
+    assert.equal(res.status, 207);
+    assert.deepEqual(
+      res.body.results.map((r: { status: number }) => r.status),
+      [201, 403]
+    );
+    assert.equal(
+      res.body.results[0].request.status,
+      MediaRequestStatus.PENDING
+    );
+    assert.deepEqual(events, []);
+  });
+
+  it('does not bypass request permissions or blocklisted movies', async (t) => {
+    const events = await radarrServer(t);
+    const user = await seedUser('demo@seerr.dev');
+    await getRepository(User).update(user.id, { permissions: 0 });
+    const demo = await loginAs('demo@seerr.dev', 'test1234');
+    const denied = await demo.post('/request/batch').send(movies(98201));
+    assert.equal(denied.body.results[0].status, 403);
+    await getRepository(Media).save(
+      new Media({
+        tmdbId: 98202,
+        mediaType: MediaType.MOVIE,
+        status: MediaStatus.BLOCKLISTED,
+      })
+    );
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const blocked = await admin.post('/request/batch').send(movies(98202));
+    assert.equal(blocked.body.results[0].status, 403);
+    assert.deepEqual(events, []);
+  });
+
+  it('reports duplicates without losing successful requests', async (t) => {
+    const events = await radarrServer(t);
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await admin
+      .post('/request/batch')
+      .send(movies(98301, 98301, 98302));
+    assert.equal(res.status, 207);
+    assert.deepEqual(
+      res.body.results.map((r: { status: number }) => r.status),
+      [201, 409, 201]
+    );
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['add', 'add', 'search']
+    );
+  });
+
+  it('does not search a partly failed delivery and saves a retryable failure', async (t) => {
+    const events = await radarrServer(t, { failMovie: 98402 });
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await admin
+      .post('/request/batch')
+      .send(movies(98401, 98402, 98403));
+    assert.equal(res.status, 207);
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['add', 'add', 'add']
+    );
+    assert.equal(res.body.results[1].request.status, MediaRequestStatus.FAILED);
+    assert.equal(res.body.results[1].status, 502);
+    assert.equal(res.body.searchErrors.length, 1);
+    const saved = await getRepository(MediaRequest).findOneByOrFail({
+      id: res.body.results[1].request.id,
+    });
+    assert.equal(saved.status, MediaRequestStatus.FAILED);
+  });
+
+  it('respects preventSearch and reports search failures without deleting requests', async (t) => {
+    const events = await radarrServer(t, { preventSearch: true });
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await admin.post('/request/batch').send(movies(98501, 98502));
+    assert.equal(res.status, 201);
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['add', 'add']
+    );
+  });
+
+  it('reports a rejected search command', async (t) => {
+    await radarrServer(t, { failSearch: true });
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await admin.post('/request/batch').send(movies(98601, 98602));
+    assert.equal(res.status, 207);
+    assert.equal(res.body.searchErrors.length, 1);
+    assert.equal(res.body.results.length, 2);
+  });
+
+  it('rejects malformed batches before creating any requests', async () => {
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+    for (const payload of [
+      { requests: [] },
+      movies(...Array(101).fill(98701)),
+      { requests: [{ mediaId: 1, mediaType: 'tv' }] },
+    ]) {
+      const res = await admin.post('/request/batch').send(payload);
+      assert.equal(res.status, 400);
+    }
+    assert.equal(await getRepository(MediaRequest).count(), 0);
   });
 });

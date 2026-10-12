@@ -18,10 +18,13 @@ import {
 import SeasonRequest from '@server/entity/SeasonRequest';
 import { User } from '@server/entity/User';
 import type {
+  BatchRequestResponse,
+  BatchRequestResult,
   MediaRequestBody,
   RequestResultsResponse,
 } from '@server/interfaces/api/requestInterfaces';
 import { Permission } from '@server/lib/permissions';
+import { withRequestBatch } from '@server/lib/requestBatch';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -34,6 +37,89 @@ import requestLock, {
 import { Router } from 'express';
 
 const requestRoutes = Router();
+
+requestRoutes.post<
+  never,
+  BatchRequestResponse,
+  { requests: MediaRequestBody[] }
+>('/batch', async (req, res, next) => {
+  if (!req.user) {
+    return next({
+      status: 401,
+      message: 'You must be logged in to request media.',
+    });
+  }
+  const requests = req.body.requests;
+  if (
+    !Array.isArray(requests) ||
+    requests.length < 1 ||
+    requests.length > 100 ||
+    requests.some(
+      (r) =>
+        !r ||
+        r.mediaType !== MediaType.MOVIE ||
+        !Number.isSafeInteger(r.mediaId) ||
+        r.mediaId <= 0
+    )
+  ) {
+    return next({
+      status: 400,
+      message: 'Submit between 1 and 100 movie requests with valid media IDs.',
+    });
+  }
+  const user = req.user;
+  try {
+    const { result: results, searchErrors } = await withRequestBatch(
+      async () => {
+        const results: BatchRequestResult[] = [];
+        for (const body of requests) {
+          try {
+            const request = await MediaRequest.request(body, user);
+            results.push({ mediaId: body.mediaId, status: 201, request });
+          } catch (error) {
+            const status =
+              error instanceof DuplicateMediaRequestError
+                ? 409
+                : error instanceof RequestPermissionError ||
+                    error instanceof QuotaRestrictedError ||
+                    error instanceof BlocklistedMediaError
+                  ? 403
+                  : 500;
+            results.push({
+              mediaId: body.mediaId,
+              status,
+              message:
+                status === 500
+                  ? 'Unable to create this request.'
+                  : (error as Error).message,
+            });
+          }
+        }
+        return results;
+      }
+    );
+    for (const result of results) {
+      if (result.request?.status === MediaRequestStatus.FAILED) {
+        result.status = 502;
+        result.message =
+          'The request was saved, but could not be sent to Radarr. Retry it from the requests page.';
+      }
+    }
+    return res
+      .status(
+        results.every((r) => r.status === 201) && !searchErrors.length
+          ? 201
+          : 207
+      )
+      .json({ results, searchErrors });
+  } catch {
+    return next({
+      status: 500,
+      message:
+        'Unable to finish the collection request. Check the requests page before retrying.',
+    });
+  }
+});
 
 requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
   '/',

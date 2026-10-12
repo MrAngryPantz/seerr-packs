@@ -64,7 +64,10 @@ export interface RadarrMovie {
   };
 }
 
-class RadarrAPI extends ServarrBase<{ movieId: number }> {
+class RadarrAPI extends ServarrBase<{
+  movieId: number;
+  moviePackMovieIds?: number[];
+}> {
   constructor({ url, apiKey }: { url: string; apiKey: string }) {
     super({ url, apiKey, cacheName: 'radarr', apiName: 'Radarr' });
   }
@@ -138,6 +141,10 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
     options: RadarrMovieOptions
   ): Promise<RadarrMovie> => {
     try {
+      const allowPacks = await this.allowsPacks(
+        options.qualityProfileId,
+        'movie'
+      );
       const movie = await this.getMovieByTmdbId(options.tmdbId);
 
       if (movie.hasFile) {
@@ -152,7 +159,11 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       }
 
       // movie exists in Radarr but is neither downloaded nor monitored
-      if (movie.id && !movie.monitored) {
+      if (
+        movie.id &&
+        (!movie.monitored ||
+          (allowPacks && movie.qualityProfileId !== options.qualityProfileId))
+      ) {
         const response = await this.axios.put<RadarrMovie>(`/movie`, {
           ...movie,
           title: options.title,
@@ -284,6 +295,14 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
           movieId,
         }
       );
+    }
+  }
+
+  public async searchMovies(movieIds: number[]): Promise<void> {
+    if (movieIds.length > 0) {
+      await this.runCommand('MoviesSearch', {
+        movieIds: [...new Set(movieIds)],
+      });
     }
   }
   public removeMovie = async (tmdbId: number): Promise<void> => {

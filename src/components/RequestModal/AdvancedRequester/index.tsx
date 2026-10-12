@@ -1,4 +1,5 @@
 /* eslint-disable react-hooks/exhaustive-deps */
+import Alert from '@app/components/Common/Alert';
 import CachedImage from '@app/components/Common/CachedImage';
 import { SmallLoadingSpinner } from '@app/components/Common/LoadingSpinner';
 import SlideCheckbox from '@app/components/Common/SlideCheckbox';
@@ -38,6 +39,12 @@ type OptionType = {
 
 const messages = defineMessages('components.RequestModal.AdvancedRequester', {
   advancedoptions: 'Advanced',
+  moviepacks:
+    'Movie packs allowed; existing files are kept and upgrades are off.',
+  seasonpacks:
+    'Multi-season packs allowed; only requested or already monitored seasons can be included. Existing episodes are kept and upgrades are off.',
+  unsafepacks:
+    'This pack profile has upgrades enabled. Turn upgrades off in Sonarr or Radarr before requesting.',
   destinationserver: 'Destination Server',
   qualityprofile: 'Quality Profile',
   rootfolder: 'Root Folder',
@@ -408,6 +415,23 @@ const AdvancedRequester = ({
     );
   }
 
+  const profile = serverData?.profiles.find((p) => p.id === selectedProfile);
+  const packsAllowed =
+    type === 'movie'
+      ? profile?.allowMoviePacks
+      : profile?.allowMultiSeasonPacks;
+  const packNotice = packsAllowed ? (
+    <Alert type={profile?.upgradeAllowed === false ? 'info' : 'warning'}>
+      {intl.formatMessage(
+        profile?.upgradeAllowed !== false
+          ? messages.unsafepacks
+          : type === 'movie'
+            ? messages.moviepacks
+            : messages.seasonpacks
+      )}
+    </Alert>
+  ) : null;
+
   if (
     (!data ||
       selectedServer === null ||
@@ -419,11 +443,12 @@ const AdvancedRequester = ({
             !serverData.tags?.length)))) &&
     (!selectedUser || (filteredUserData ?? []).length < 2)
   ) {
-    return null;
+    return packNotice;
   }
 
   return (
     <>
+      {packNotice}
       <div className="mb-2 mt-4 flex items-center text-lg font-semibold">
         {intl.formatMessage(messages.advancedoptions)}
       </div>

@@ -67,6 +67,8 @@ serviceRoutes.get<{ radarrId: string }>(
       profiles: profiles.map((profile) => ({
         id: profile.id,
         name: profile.name,
+        upgradeAllowed: profile.upgradeAllowed,
+        allowMoviePacks: profile.allowMoviePacks,
       })),
       rootFolders: rootFolders.map((folder) => ({
         id: folder.id,
@@ -151,6 +153,8 @@ serviceRoutes.get<{ sonarrId: string }>(
         profiles: profiles.map((profile) => ({
           id: profile.id,
           name: profile.name,
+          upgradeAllowed: profile.upgradeAllowed,
+          allowMultiSeasonPacks: profile.allowMultiSeasonPacks,
         })),
         rootFolders: rootFolders.map((folder) => ({
           id: folder.id,

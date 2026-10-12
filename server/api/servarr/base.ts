@@ -46,6 +46,9 @@ export interface RootFolder {
 export interface QualityProfile {
   id: number;
   name: string;
+  upgradeAllowed?: boolean;
+  allowMultiSeasonPacks?: boolean;
+  allowMoviePacks?: boolean;
 }
 
 interface QueueItem {
@@ -127,8 +130,11 @@ class ServarrBase<QueueItemAppendT> extends ExternalAPI {
     }
   };
 
-  public getProfiles = async (): Promise<QualityProfile[]> => {
+  public getProfiles = async (fresh = false): Promise<QualityProfile[]> => {
     try {
+      if (fresh) {
+        return (await this.axios.get<QualityProfile[]>('/qualityProfile')).data;
+      }
       const data = await this.getRolling<QualityProfile[]>(
         `/qualityProfile`,
         undefined,
@@ -143,6 +149,21 @@ class ServarrBase<QueueItemAppendT> extends ExternalAPI {
       );
     }
   };
+
+  public async allowsPacks(
+    profileId: number,
+    type: 'tv' | 'movie'
+  ): Promise<boolean> {
+    const profile = (await this.getProfiles(true)).find((p) => p.id === profileId);
+    const allowed =
+      type === 'tv' ? profile?.allowMultiSeasonPacks : profile?.allowMoviePacks;
+    if (allowed && profile?.upgradeAllowed !== false) {
+      throw new Error(
+        'Pack requests require a quality profile with upgrades disabled.'
+      );
+    }
+    return allowed === true;
+  }
 
   public getRootFolders = async (): Promise<RootFolder[]> => {
     try {
@@ -163,16 +184,31 @@ class ServarrBase<QueueItemAppendT> extends ExternalAPI {
 
   public getQueue = async (): Promise<(QueueItem & QueueItemAppendT)[]> => {
     try {
-      const response = await this.axios.get<QueueResponse<QueueItemAppendT>>(
-        `/queue`,
-        {
-          params: {
-            includeEpisode: true,
-          },
+      const records = new Map<number, QueueItem & QueueItemAppendT>();
+      for (let page = 1; page <= 1000; page++) {
+        const { data } = await this.axios.get<QueueResponse<QueueItemAppendT>>(
+          '/queue',
+          {
+            params: {
+              includeEpisode: true,
+              page,
+              pageSize: 100,
+              sortKey: 'title',
+              sortDirection: 'ascending',
+            },
+          }
+        );
+        let added = 0;
+        for (const item of data.records) {
+          if (!records.has(item.id)) added++;
+          records.set(item.id, item);
         }
-      );
-
-      return response.data.records;
+        if (!data.records.length || page * data.pageSize >= data.totalRecords)
+          return [...records.values()];
+        if (!added)
+          throw new Error('The queue did not advance to the next page');
+      }
+      throw new Error('The queue exceeded the page limit');
     } catch (e) {
       throw new Error(
         `[${this.apiName}] Failed to retrieve queue: ${e.message}`,
